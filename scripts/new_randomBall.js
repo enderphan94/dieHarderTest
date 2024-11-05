@@ -84,22 +84,20 @@
 const fs = require('fs');
 const crypto = require('crypto');
 
-const TOTAL_BALLS = 7; // Total balls to generate (1 to 7)
-const OUTPUT_FILE = 'random_balls.bin'; // Output file for the binary data
-const NUMBER_OF_GENERATIONS = 100_000_000; // Total number of random balls to generate
-const BATCH_SIZE = 100_000; // Number of balls to process in each batch
-const BITS_PER_BALL = 3; // We need 3 bits to store numbers 1 through 7
-const BALLS_PER_UINT32 = Math.floor(32 / BITS_PER_BALL); // Number of balls per 32-bit integer
+const TOTAL_BALLS = 7; 
+const OUTPUT_FILE = 'random_balls.bin'; 
+const NUMBER_OF_GENERATIONS = 100_000_000; 
+const BATCH_SIZE = 100_000; 
+const BITS_PER_BALL = 3; 
 
-// Generate a secure random mask using 4 random bytes
-const xorMask = crypto.randomBytes(4).readUInt32BE(0);
-
-// Function to generate a secure random number between 1 and TOTAL_BALLS, applying XOR mask for added entropy
+// Function to generate a secure random number between 1 and TOTAL_BALLS, applying dynamic XOR mask
+// Problem: The XOR mask is generated once and reused for every number, which means its influence on the randomness is uniform across all numbers. This can negate its intended effect by introducing a consistent pattern to all numbers.
 function generateMaskedRandomBall() {
   const randomBytes = crypto.randomBytes(4);
   const randomIndex = randomBytes.readUInt32BE(0) % TOTAL_BALLS;
-  const maskedBall = ((randomIndex + 1) ^ xorMask) >>> 0; // XOR with mask
-  return maskedBall;
+  const xorMask = crypto.randomBytes(4).readUInt32BE(0);  // Dynamic XOR mask generation
+  const maskedBall = ((randomIndex + 1) ^ xorMask) >>> 0; // Apply XOR mask dynamically
+  return maskedBall % (1 << BITS_PER_BALL);  // Ensure it still uses only the required bits
 }
 
 // Function to generate and write packed masked random balls incrementally to the file
@@ -108,20 +106,24 @@ async function generateRandomBalls() {
 
   for (let batchStart = 0; batchStart < NUMBER_OF_GENERATIONS; batchStart += BATCH_SIZE) {
     const currentBatchSize = Math.min(BATCH_SIZE, NUMBER_OF_GENERATIONS - batchStart);
-    const packedBuffer = Buffer.alloc(Math.ceil((currentBatchSize * BITS_PER_BALL) / 8)); // Adjust buffer size
+    const packedBuffer = Buffer.alloc(Math.ceil(currentBatchSize * BITS_PER_BALL / 8)); // Adjust buffer size for packing
 
     let bitOffset = 0;
 
     for (let i = 0; i < currentBatchSize; i++) {
       const maskedRandomBall = generateMaskedRandomBall();
       
-      // Shift the masked ball value into its position in the 32-bit packed integer
       const byteIndex = Math.floor(bitOffset / 8);
       const bitIndex = bitOffset % 8;
+      const bitsAvailable = 8 - bitIndex; // Bits available in the current byte
 
-      // Apply the ball value into the buffer using bitwise operations
-      packedBuffer[byteIndex] |= (maskedRandomBall << (5 - bitIndex)); // Align to 3 bits
-      if (bitIndex > 5) packedBuffer[byteIndex + 1] |= (maskedRandomBall >> (bitIndex - 5));
+      if (bitsAvailable >= BITS_PER_BALL) {
+        packedBuffer[byteIndex] |= maskedRandomBall << (bitsAvailable - BITS_PER_BALL);
+      } else {
+        // If not enough space in the current byte, split the bits
+        packedBuffer[byteIndex] |= maskedRandomBall >> (BITS_PER_BALL - bitsAvailable);
+        packedBuffer[byteIndex + 1] = maskedRandomBall << (8 - BITS_PER_BALL + bitsAvailable);
+      }
 
       bitOffset += BITS_PER_BALL;
     }
@@ -130,11 +132,9 @@ async function generateRandomBalls() {
     console.log(`Processed ${batchStart + currentBatchSize} of ${NUMBER_OF_GENERATIONS} packed random balls...`);
   }
 
-  // Close the file stream after writing all data
   fileStream.end(() => {
     console.log(`Generated ${NUMBER_OF_GENERATIONS} packed random balls and saved to ${OUTPUT_FILE}`);
   });
 }
 
-// Call the function to generate the packed random balls
 generateRandomBalls().catch(console.error);
